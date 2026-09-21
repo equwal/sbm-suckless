@@ -17,7 +17,7 @@ help () {
 }
 
 copy () {
-    sort -t2 "$BOOKMARKS" | dmenu -i -l $DMENULINES -p "bookmark:" | cut -f 1 -d ' ' | xclip -i -selection clipboard
+    sort -t2 "$BOOKMARKS" | dmenu -i -l $DMENULINES -p "bookmark:" | awk '{ print $1 }' | xclip -i -selection clipboard
 }
 
 add () {
@@ -35,6 +35,8 @@ add () {
            | sed 's/ $//')"
 
     printf "%s %s | %s\\n" "$url" "$desc" "$tags" >> "$BOOKMARKS"
+    # bm-sync, if installed, sends the bookmark to your other devices.
+    if command -v bm-sync >/dev/null 2>&1; then bm-sync -q >/dev/null 2>&1 & fi
 }
 
 edit () {

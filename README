@@ -8,6 +8,7 @@ And interact with this file using the dmenu script.
 
 == Scripts ==
 bm      search & copy, add, or edit a bookmark. Incomplete.
+bm-sync sync the bookmark file with your other devices.
 bmks    the old version from somewhere. Will be removed soon.
 == Install ==
 Requirements: xclip, dmenu, make
@@ -35,6 +36,32 @@ URL<tab>description\n"
 
 Some ideas taken from Karl Voit:
 https://karl-voit.at/2022/01/29/How-to-Use-Tags/
+
+== Sync ==
+bm-sync keeps the bookmark file the same on all your devices. It works
+with bm on other computers, the sbm app for Android and the sbm add-on for
+Firefox and Chrome. It needs curl. Like bm, it uses the file in $BOOKMARKS.
+
+    bm-sync login        # once on each device: email and password
+    bm-sync              # sync now
+    bm-sync status       # the server and the time of the last sync
+    bm-sync logout       # sign out on this device
+
+After bm adds a bookmark, bm runs bm-sync in the background. The server
+merges the changes of each device. When you add or delete a bookmark on
+one device, sync adds or deletes it on the others. bm-sync keeps the
+sign-in token in ~/.config/sbm/sync. Only you can read this file.
+
+By default, bm-sync uses the server https://sbm.subread.space. Create an
+account there first. The server is free software
+(https://github.com/equwal/sbm-sync), so you can run your own:
+
+    bm-sync login https://sbm.example.org
+
+bm writes lines as "URL description | tags". The app and the add-on write
+lines as "URL<tab>description<tab>tags", and bm-sync puts these lines in
+your file. The file can hold lines in both formats. bm copies the URL of
+both.
 
 == Tip ==
 The bookmarks can be converted from the web browser formats using
