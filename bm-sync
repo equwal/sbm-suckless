@@ -10,6 +10,7 @@ CONFIG=${SBM_SYNC_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sbm/sync}
 SERVER=https://sbm.subread.space
 STATE=$BOOKMARKS.sync   # the version of the last sync
 LOCK=$BOOKMARKS.sync.lock
+WLOCK=$BOOKMARKS.lock   # the write lock of bm
 quiet=
 
 usage () {
@@ -40,6 +41,32 @@ setting () {
 cleanup () {
     rm -rf "$work"
     [ -z "$locked" ] || rm -rf "$LOCK"
+    wunlock
+}
+
+# wlock: take the write lock of bm, as bm does, so that neither writes over
+# a change of the other. After $SBM_LOCK_WAIT seconds (default 10) bm-sync
+# stops, and the next add in bm syncs again.
+wlock () {
+    waited=0
+    until mkdir "$WLOCK" 2>/dev/null; do
+        pid=$(cat "$WLOCK/pid" 2>/dev/null)
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            [ "$(cat "$WLOCK/pid" 2>/dev/null)" != "$pid" ] || rm -rf "$WLOCK"
+            continue
+        fi
+        [ "$waited" -lt "${SBM_LOCK_WAIT:-10}" ] \
+            || die "$BOOKMARKS is in use: sync again later"
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo $$ > "$WLOCK/pid"
+    wlocked=1
+}
+
+wunlock () {
+    [ -z "$wlocked" ] || rm -rf "$WLOCK"
+    wlocked=
 }
 
 login () {
@@ -119,7 +146,9 @@ sync () {
     tries=0
     while :; do
         rm -f "$LOCK/again"
+        wlock
         cat "$BOOKMARKS" > "$work/sent" || die "cannot read $BOOKMARKS"
+        wunlock
         # An empty file with a version tells the server to delete all
         # bookmarks. Without a version, the server deletes nothing.
         [ -s "$work/sent" ] || rm -f "$STATE"
@@ -136,8 +165,12 @@ sync () {
         version=$(tr -d '\r' < "$work/head" | sed -n 's/^[Ss][Bb][Mm]-[Vv][Ee][Rr][Ss][Ii][Oo][Nn]: *//p')
         [ -n "$version" ] || die 'the server gave no version'
 
+        # Hold the lock from the check to the write, so that no add of bm
+        # comes between them.
+        wlock
         # bm changed the file during the request: send the new file.
         if ! cmp -s "$work/sent" "$BOOKMARKS"; then
+            wunlock
             tries=$((tries + 1))
             [ $tries -lt 5 ] || die 'the file changes all the time: try again later'
             continue
@@ -150,6 +183,7 @@ sync () {
             cat "$work/out" > "$BOOKMARKS" || die "cannot write $BOOKMARKS"
         fi
         printf '%s\n' "$version" > "$STATE"
+        wunlock
         [ -e "$LOCK/again" ] || break
     done
     say "in sync: $(grep -c . "$BOOKMARKS") bookmarks"
@@ -172,6 +206,7 @@ command -v curl >/dev/null 2>&1 || die 'curl is not installed'
 work=${TMPDIR:-/tmp}/bm-sync.$$
 mkdir -m 700 "$work" || die "cannot create $work"
 locked=
+wlocked=
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 

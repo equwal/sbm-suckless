@@ -16,6 +16,36 @@ help () {
     printf 'Flags:\n-h, --help\n-c, --copy\n-a, --add\n-e, --edit\n'
 }
 
+# lock: take the write lock of $BOOKMARKS, a directory beside it. bm-sync
+# takes it too, so that neither writes over a change of the other. The lock
+# of a process that is gone is taken over. bm waits $SBM_LOCK_WAIT seconds
+# (default 10) for it.
+lock () {
+    waited=0
+    until mkdir "$BOOKMARKS.lock" 2>/dev/null; do
+        pid=$(cat "$BOOKMARKS.lock/pid" 2>/dev/null)
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            [ "$(cat "$BOOKMARKS.lock/pid" 2>/dev/null)" != "$pid" ] || rm -rf "$BOOKMARKS.lock"
+            continue
+        fi
+        if [ "$waited" -ge "${SBM_LOCK_WAIT:-10}" ]; then
+            printf 'bm: %s is in use. If no bm-sync runs, remove %s.lock\n' \
+                "$BOOKMARKS" "$BOOKMARKS" >&2
+            exit 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo $$ > "$BOOKMARKS.lock/pid"
+    trap 'rm -rf "$BOOKMARKS.lock"' EXIT
+    trap 'exit 1' HUP INT TERM
+}
+
+unlock () {
+    rm -rf "$BOOKMARKS.lock"
+    trap - EXIT
+}
+
 copy () {
     sort -t2 "$BOOKMARKS" | dmenu -i -l $DMENULINES -p "bookmark:" | awk '{ print $1 }' | xclip -i -selection clipboard
 }
@@ -34,7 +64,9 @@ add () {
     tags="$(printf "$tags" | tr ' ' '\n' | sort | uniq | tr '\n' ' ' \
            | sed 's/ $//')"
 
+    lock
     printf "%s %s | %s\\n" "$url" "$desc" "$tags" >> "$BOOKMARKS"
+    unlock
     # bm-sync, if installed, sends the bookmark to your other devices.
     if command -v bm-sync >/dev/null 2>&1; then bm-sync -q >/dev/null 2>&1 & fi
 }

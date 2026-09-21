@@ -53,7 +53,9 @@ EOF
 # curl: plays an sbm-sync server that keeps its file in $T/srv/file. Lines
 # in $T/srv/other come from another device, once. With $T/srv/code, the
 # server refuses with that status. With $T/srv/touch, bm adds a line during
-# the request. With $T/srv/broken, bm-sync cannot read the answer.
+# the request. With $T/srv/broken, bm-sync cannot read the answer. With
+# $T/srv/hold, a process takes the write lock of bm during the request and
+# keeps it; its pid goes to $T/srv/holder.
 cat > "$t/bin/curl" <<'EOF'
 #!/bin/sh
 srv=$T/srv
@@ -95,6 +97,11 @@ if [ -e "$srv/touch" ]; then
     rm -f "$srv/touch"
     echo 'https://c.example C | ' >> "$BOOKMARKS"
 fi
+if [ -e "$srv/hold" ]; then
+    sleep 30 >/dev/null 2>&1 &
+    echo $! > "$srv/holder"
+    mkdir "$BOOKMARKS.lock" && echo $! > "$BOOKMARKS.lock/pid"
+fi
 printf 200
 EOF
 chmod +x "$t/bin/dmenu" "$t/bin/xclip" "$t/bin/bm-sync" "$t/bin/curl"
@@ -122,6 +129,38 @@ while [ ! -s "$t/bm-sync.log" ] && [ $i -lt 10 ]; do
     i=$((i + 1))
 done
 eq 'add runs bm-sync -q' "$(cat "$t/bm-sync.log" 2>/dev/null)" -q
+
+# The write lock. The other process adds a line after two seconds, and then
+# frees the lock.
+: > "$BOOKMARKS"
+mkdir "$BOOKMARKS.lock"
+( sleep 2; echo 'https://first.example First | ' >> "$BOOKMARKS"
+  rm -rf "$BOOKMARKS.lock" ) &
+first=$!
+echo "$first" > "$BOOKMARKS.lock/pid"
+printf '%s\n' https://second.example Second done > "$t/answers"
+SBM_LOCK_WAIT=10 $sh "$here/bm" -a
+wait "$first"
+eq 'add waits for the write lock, and adds after the other process' \
+    "$(cut -d ' ' -f 1 "$BOOKMARKS" | tr '\n' ' ')" 'https://first.example https://second.example '
+
+sleep 30 >/dev/null 2>&1 &
+holder=$!
+mkdir "$BOOKMARKS.lock" && echo "$holder" > "$BOOKMARKS.lock/pid"
+printf '%s\n' https://new.example New done > "$t/answers"
+SBM_LOCK_WAIT=1 $sh "$here/bm" -a 2>"$t/err"
+eq 'add stops when the lock stays, says why, and adds nothing' \
+    "$?:$(grep -c 'in use' "$t/err"):$(grep -c new.example "$BOOKMARKS")" '1:1:0'
+kill "$holder"
+rm -rf "$BOOKMARKS.lock"
+
+true &
+wait $!
+mkdir "$BOOKMARKS.lock" && echo $! > "$BOOKMARKS.lock/pid"
+printf '%s\n' https://after.example After done > "$t/answers"
+SBM_LOCK_WAIT=1 $sh "$here/bm" -a
+eq 'add takes over the lock of a process that is gone, and frees it' \
+    "$(grep -c after.example "$BOOKMARKS"):$(ls -d "$BOOKMARKS.lock" 2>/dev/null)" '1:'
 
 # ---- bm-sync ----
 
@@ -171,6 +210,29 @@ eq 'on 402, bm-sync fails, says why, and keeps the file and the version' \
         cmp -s "$t/version.before" "$BOOKMARKS.sync" && echo same)" \
     '1:bm-sync: sync is paused:same'
 rm -f "$srv/code"
+
+# While bm holds the write lock, bm-sync neither reads nor writes the file.
+export SBM_LOCK_WAIT=1
+echo 'https://other.example Other | ' > "$srv/other"
+sleep 30 >/dev/null 2>&1 &
+holder=$!
+mkdir "$BOOKMARKS.lock" && echo "$holder" > "$BOOKMARKS.lock/pid"
+bs -q 2>"$t/err"
+rc=$?
+kill "$holder"
+rm -rf "$BOOKMARKS.lock"
+eq 'bm-sync does not read the file while bm holds the lock, and says why' \
+    "$rc:$(grep -c 'in use' "$t/err"):$(cmp -s "$t/file.before" "$BOOKMARKS" && echo same)" \
+    '1:1:same'
+: > "$srv/hold"
+bs -q 2>"$t/err"
+rc=$?
+kill "$(cat "$srv/holder")"
+rm -rf "$BOOKMARKS.lock" "$srv/hold"
+eq 'bm-sync does not write while bm holds the lock, and keeps the version' \
+    "$rc:$(cmp -s "$t/file.before" "$BOOKMARKS" &&
+        cmp -s "$t/version.before" "$BOOKMARKS.sync" && echo same)" '1:same'
+unset SBM_LOCK_WAIT
 
 rm -f "$BOOKMARKS"
 bs -q
