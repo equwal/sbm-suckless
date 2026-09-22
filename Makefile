@@ -9,7 +9,7 @@ check:
 dist:
 	@echo creating dist tarball
 	@mkdir -p sbm-${VERSION}-temp
-	@cp -R Makefile config.mk bm bm-sync test.sh sbm-${VERSION}-temp
+	@cp -R LICENSE Makefile config.mk bm bm-sync test.sh sbm-${VERSION}-temp
 	@mv sbm-${VERSION}-temp sbm-${VERSION}
 	@tar -cf sbm-${VERSION}.tar sbm-${VERSION}
 	@gzip sbm-${VERSION}.tar

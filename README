@@ -66,3 +66,7 @@ both.
 == Tip ==
 The bookmarks can be converted from the web browser formats using
 netscape-bookmark-converter at https://github.com/jhh/netscape-bookmark-converter
+
+== License ==
+AGPL-3.0: see LICENSE. If you run a changed version for other people over a
+network, give them its source code.
