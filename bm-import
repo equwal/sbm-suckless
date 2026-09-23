@@ -1,0 +1,155 @@
+#!/bin/sh
+
+# bm-import: turn a browser's bookmarks into bm's format, on stdout.
+#
+#     bm-import bookmarks.html | bm --merge
+#     bm-import brave | bm --merge
+#
+# Reads the Netscape HTML that every browser exports, or the JSON file that
+# Chromium style browsers keep (this needs jq). Folder names become tags:
+# "Dev Tools" is dev-tools. Only http, https, ftp and file URLs are kept.
+# A browser name reads the JSON files of all profiles of that browser, in
+# the directory that the browser uses on Linux, macOS or Windows (Cygwin).
+# --files prints the names of these files, for bm-watch.
+
+usage () {
+    cat <<'EOF2'
+usage: bm-import <file> | vivaldi | chrome | brave | edge | chromium
+       bm-import --files vivaldi | chrome | brave | edge | chromium
+EOF2
+}
+
+die () {
+    printf 'bm-import: %s\n' "$*" >&2
+    exit 1
+}
+
+files=
+case ${1-} in
+    -h|--help) usage; exit 0 ;;
+    --files)   files=1; shift ;;
+esac
+if [ $# -ne 1 ]; then
+    usage >&2
+    exit 2
+fi
+
+# browser_dir <linux> <macos> <windows>: the first directory of the browser
+# that exists. The names are relative to ~/.config, to ~/Library/Application
+# Support and to %LOCALAPPDATA%. The directory holds one folder per profile.
+browser_dir () {
+    appdata=${LOCALAPPDATA-}
+    if [ -n "$appdata" ] && command -v cygpath >/dev/null 2>&1; then
+        appdata=$(cygpath -u "$appdata")
+    fi
+    for dir in "${XDG_CONFIG_HOME:-$HOME/.config}/$1" \
+               "$HOME/Library/Application Support/$2" \
+               ${appdata:+"$appdata/$3/User Data"}; do
+        if [ -d "$dir" ]; then
+            printf '%s\n' "$dir"
+            return 0
+        fi
+    done
+    return 1
+}
+
+case $1 in
+    vivaldi)  dir=$(browser_dir vivaldi Vivaldi Vivaldi) ;;
+    chrome)   dir=$(browser_dir google-chrome Google/Chrome Google/Chrome) ;;
+    brave)    dir=$(browser_dir BraveSoftware/Brave-Browser \
+                  BraveSoftware/Brave-Browser BraveSoftware/Brave-Browser) ;;
+    edge)     dir=$(browser_dir microsoft-edge 'Microsoft Edge' Microsoft/Edge) ;;
+    chromium) dir=$(browser_dir chromium Chromium Chromium) ;;
+    *)        dir= ;;
+esac || die "found no profiles of $1"
+if [ -n "$files" ]; then
+    if [ -z "$dir" ]; then
+        usage >&2
+        exit 2
+    fi
+    for file in "$dir"/*/Bookmarks; do
+        if [ -r "$file" ]; then printf '%s\n' "$file"; fi
+    done
+    exit 0
+fi
+if [ -n "$dir" ]; then
+    command -v jq >/dev/null 2>&1 || die "reading $1 needs jq"
+else
+    [ -r "$1" ] || die "cannot read $1"
+fi
+
+# Chromium JSON. The trash (Vivaldi has one) is left out.
+from_json () {
+    command -v jq >/dev/null 2>&1 || die 'a Chromium bookmark file needs jq'
+    jq -r '
+        def slug: ascii_downcase | gsub("[^a-z0-9]+"; "-")
+                  | sub("^-"; "") | sub("-$"; "");
+        def emit(path):
+            if .type == "url" then
+                [.url, (.name | gsub("[\t\r\n]+"; " ")),
+                 (path | unique | join(" "))] | join("\t")
+            elif (.children? | type) == "array" then
+                (path + ([.name | slug] | map(select(. != "")))) as $sub
+                | .children[] | emit($sub)
+            else empty end;
+        .roots | to_entries[]
+        | select(.key != "trash" and (.value | type) == "object")
+        | .value.children[]? | emit([])' "$1"
+}
+
+# Netscape HTML. <H3> opens a folder, </DL> closes it.
+from_html () {
+    awk '
+    function decode(s) {
+        gsub(/&lt;/, "<", s); gsub(/&gt;/, ">", s); gsub(/&quot;/, "\"", s)
+        gsub(/&#39;|&#x27;|&apos;/, "\047", s); gsub(/&nbsp;/, " ", s)
+        gsub(/&amp;/, "\\&", s)
+        gsub(/[ \t\r]+/, " ", s); sub(/^ /, "", s); sub(/ $/, "", s)
+        return s
+    }
+    function slug(s) {
+        s = tolower(s)
+        gsub(/[^a-z0-9]+/, "-", s); sub(/^-/, "", s); sub(/-$/, "", s)
+        return s
+    }
+    {
+        upper = toupper($0)
+        if ((at = index(upper, "<H3")) > 0) {
+            name = substr($0, at)
+            name = substr(name, index(name, ">") + 1)
+            end = index(toupper(name), "</H3")
+            if (end) name = substr(name, 1, end - 1)
+            folder[++depth] = slug(decode(name))
+        }
+        if ((at = index(upper, "HREF=\"")) > 0) {
+            url = substr($0, at + 6)
+            rest = substr(url, index(url, "\"") + 1)
+            url = decode(substr(url, 1, index(url, "\"") - 1))
+            name = substr(rest, index(rest, ">") + 1)
+            end = index(toupper(name), "</A")
+            if (end) name = substr(name, 1, end - 1)
+            tags = ""
+            for (i = 1; i <= depth; i++)
+                if (folder[i] != "" && index(" " tags " ", " " folder[i] " ") == 0)
+                    tags = tags (tags == "" ? "" : " ") folder[i]
+            printf "%s\t%s\t%s\n", url, decode(name), tags
+        }
+        if (index(upper, "</DL>") > 0 && depth > 0) depth--
+    }' "$1"
+}
+
+# rows <file>: the rows of the file, or of every profile of the browser.
+rows () {
+    if [ -n "$dir" ]; then
+        for file in "$dir"/*/Bookmarks; do
+            if [ -r "$file" ]; then from_json "$file"; fi
+        done
+        return
+    fi
+    case $(LC_ALL=C tr -d ' \t\r\n' < "$1" | dd bs=1 count=1 2>/dev/null) in
+        '{') from_json "$1" ;;
+        *)   from_html "$1" ;;
+    esac
+}
+
+rows "$1" | awk -F'\t' '$1 ~ /^(https?|ftp|file):\/\//'

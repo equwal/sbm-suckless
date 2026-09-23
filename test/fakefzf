@@ -1,0 +1,61 @@
+#!/bin/sh
+
+# Scripted stand-in for fzf, installed as "fzf" on the test PATH. Consumes one
+# line of $SBM_TEST_ANSWERS per call, like test/fakemenu. What it prints
+# depends on the options it was given, as with the real thing:
+#
+#   --expect             answer key:text   the typed text, the key ("enter"
+#                                          is the empty key), then the first
+#                                          row containing text, if any
+#   --multi              answer text:words the typed text, then the choices
+#                                          that start with each word
+#   --print-query alone  answer text       the typed text, then the first row
+#                                          containing it, if any
+#   none of these        answer text       the first row containing text
+#
+# An empty answer is ESC: no output, exit 130.
+
+[ -z "$SBM_TEST_LOG" ] || printf 'fzf %s\n' "$*" >> "$SBM_TEST_LOG"
+
+mode=pick
+for arg in "$@"; do
+    case $arg in
+        --print-query) [ "$mode" = pick ] && mode=query ;;
+        --multi)       [ "$mode" = expect ] || mode=multi ;;
+        --expect=*)    mode=expect ;;
+    esac
+done
+
+choices=$(cat)
+answer=$(sed -n 1p "$SBM_TEST_ANSWERS")
+sed 1d "$SBM_TEST_ANSWERS" > "$SBM_TEST_ANSWERS.next"
+mv "$SBM_TEST_ANSWERS.next" "$SBM_TEST_ANSWERS"
+
+[ -n "$answer" ] || exit 130
+
+row () {
+    [ -n "$1" ] || return 0
+    printf '%s\n' "$choices" | grep -F -- "$1" | head -n 1
+}
+
+case $mode in
+    expect)
+        key=${answer%%:*}
+        [ "$key" = enter ] && key=
+        printf '%s\n%s\n' "${answer#*:}" "$key"
+        row "${answer#*:}"
+        ;;
+    multi)
+        printf '%s\n' "${answer%%:*}"
+        for word in ${answer#*:}; do
+            printf '%s\n' "$choices" | grep -- "^$word " | head -n 1
+        done
+        ;;
+    query)
+        printf '%s\n' "$answer"
+        row "$answer"
+        ;;
+    *)
+        row "$answer"
+        ;;
+esac

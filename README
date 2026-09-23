@@ -1,72 +1,335 @@
 Manage bookmarks with dmenu and a basic file.
 
+The file is Tab Separated Values, one bookmark per line:
+
+    URL<tab>description<tab>tag tag tag
+
 For example:
 
-https://equwal.com  Spenser Truex's website.
+    https://equwal.com	Spenser Truex's website.	users
 
-And interact with this file using the dmenu script.
+Lines starting with # are ignored. bm is one way to work with the file;
+cut, grep, awk and your editor are others.
 
-== Scripts ==
-bm      search & copy, add, or edit a bookmark. Incomplete.
-bm-sync sync the bookmark file with your other devices.
-bmks    the old version from somewhere. Will be removed soon.
+== Design ==
+bm owns the bookmark file and talks to the menu. Everything else is a small
+filter that reads or writes bookmark lines, so the pieces combine like any
+other Unix tools, and you install only the ones you use:
+
+    bm          pick, open, copy, add, edit, delete, list, merge
+    bm-import   browser bookmarks        -> bookmark lines
+    bm-check    bookmark lines           -> the dead links among them
+    bm-html     bookmark lines           -> a searchable web page
+    bm-migrate  the old sbm file format  -> bookmark lines
+    bm-title    a URL                    -> the page's title
+    bm-commit   commit the bookmark file to git
+    bm-watch    browser bookmarks        -> bm, now and after each change
+    bm-sync     the bookmark file        <-> your other devices
+
+    bm-import bookmarks.html | bm --merge
+    bm --tag code --list | bm-check -
+    bm --list | grep -i wiki | bm-html -t Wikis - > wikis.html
+
+bm, bm-migrate, bm-html and bm-check are C99 that needs nothing but libc
+and POSIX. bm-import, bm-title, bm-commit, bm-watch and bm-sync are POSIX sh
+with POSIX utilities: no bash, no GNU options. The menu, the clipboard, the opener, curl
+and your editor are still separate programs. bm runs them with their
+arguments as they are; no shell ever sees a URL.
+
+== Requirements ==
+A C99 compiler and make to build. dmenu (or fzf) and one of xclip, xsel or
+wl-clipboard to run. sh and awk for the tools that are scripts. curl for
+bm-title, bm-check and bm-sync, jq for bm-import of Chromium files, git for
+bm-commit.
+
 == Install ==
-Requirements: xclip, dmenu, make
-1) Export the $BOOKMARKS variable containing the location of the
-bookmarks. I like to use ~/.local/share/sbm to store my config.
-    mkdir -p ~/.local/share/sbm/
-    ~/.bashrc
-        export BOOKMARKS="~/.local/share/sbm/bookmarks"
-2) define your tag choices in USERTAGS and export that too. The file syntax is:
+Edit TOOLS in config.mk to choose what gets installed, then
 
-    <tag><space><description><newline>
+    make
+    make install                        # to /usr/local/bin
+    make PREFIX="$HOME/.local" install
 
-    See the included usertags file for an example.
+Each release on GitHub also has an installer for Windows and a portable app
+for macOS. See Windows and macOS below.
 
-    ~/.bashrc
-        export USERTAGS="~/.local/share/sbm/usertags"
+== Setup ==
+Nothing is required. Bookmarks are kept in ~/.local/share/sbm/bookmarks
+($XDG_DATA_HOME is honoured) and the file is created on first use.
 
-3) make install
+Tag choices are read from ~/.local/share/sbm/usertags:
+
+    <tag><space>|<space><description><newline>
+
+Start from the included example, or from nothing: a tag typed into the tag
+menu that is not in the file yet is added to it.
+
+    mkdir -p ~/.local/share/sbm
+    cp usertags engines ~/.local/share/sbm/
 
 == Usage ==
-Execute
+    bm                   browse (see below)
+    bm -o, --open        open a bookmark, an address, or a web search
+                         (-p, --plumb is the same)
+    bm -c, --copy        copy a bookmark's URL to the clipboard
+    bm --print           print a bookmark's URL
+    bm -a, --add [url]   add a bookmark
+    bm -e, --edit        open the file in $VISUAL/$EDITOR at a bookmark
+    bm -d, --delete      delete a bookmark
+    bm -l, --list        print the bookmarks
+    bm -m, --merge       add the bookmark lines on stdin, skipping known ones
+    -t, --tag TAG        restrict any of the above to one tag
+    -S, --sort ORDER     used (default), recent, url, desc or tag
 
-search-term is an extended regex for grep.\n\nBookmark lines are Tab Separated Values\n"
-URL<tab>description\n"
+Bind "bm" and "bm -a" to keys in your window manager.
 
-Some ideas taken from Karl Voit:
-https://karl-voit.at/2022/01/29/How-to-Use-Tags/
+== Browsing ==
+Plain "bm" lists the bookmarks. Pick one and a second menu shows it in full
+(dmenu cannot preview while you scroll, so this is its preview) and asks what
+to do:
+
+    open
+    copy
+    edit
+    delete
+      https://suckless.org/
+      software that sucks less
+      tags: code org
+      used: 12
+
+Closing the second menu goes back to the list, closing the list leaves.
+[add] at the top of the list adds a bookmark.
+
+With fzf (no display, or SBM_MENU=fzf) it is one screen: the bookmark under
+the cursor is previewed live, and keys do the rest.
+
+    ENTER   open            ctrl-a  add            ctrl-s  next sort order
+    ctrl-y  copy            ctrl-d  delete (asks)
+    ESC     leave           ctrl-e  edit
+
+To see the bookmarks of a tag, type the tag. fzf searches the tags too.
+
+== Web search ==
+In the list, and in "bm -o", text that is not a bookmark is not wasted:
+
+    suckless.org/dwm          one word with a dot or "://": opened as an address
+    posix sh printf           anything else: searched for on the web
+    w dynamic menu            first word is a keyword: that engine is used
+
+So one key gives you bookmarks first and the web behind them. The default
+engine is DuckDuckGo; set another with SBM_SEARCH='https://.../?q=%s'.
+Keywords are read from ~/.local/share/sbm/engines:
+
+    <keyword><space>|<space><url with %s><newline>
+
+See the included engines file.
+
+== Adding ==
+Without a url, bm offers the X11 primary selection, or the clipboard, when
+it holds a URL. With bm-title installed the description defaults to the
+page's title (curl, 3 second limit; SBM_FETCH=0 turns it off). In dmenu the
+default is the one entry in the menu: Return accepts it, Shift-Return sends
+exactly what you typed.
+
+Tags are chosen one at a time until "done" is picked or the menu is closed
+(fzf: TAB marks, ENTER confirms). Typing a tag that does not exist creates it.
+
+A URL that is already bookmarked is refused (exit status 3). URLs are
+compared without their scheme, a leading www. and trailing slashes.
+
+== Sorting ==
+    used     most opened or copied first, then by url (the default)
+    recent   most recently added first
+    url, desc, tag
+
+Set a default with SBM_SORT. Use counts live in "$BOOKMARKS.usage", so the
+bookmark file itself stays a plain list.
+
+== A web page of your bookmarks ==
+    bm-html > ~/public_html/bookmarks.html
+
+One self-contained file: no server side, nothing loaded from elsewhere.
+Bookmarks are listed under each of their tags, with the tags linked at the
+top. A dozen lines of inline script add a filter box; without script the page
+is still the complete list, and Ctrl-F works. page.html?q=words starts out
+filtered, so the page can be a search keyword in your browser, or in bm:
+
+    b | https://example.org/bookmarks.html?q=%s
+
+Links that would run script (javascript:, data:) are never written.
+
+== Importing ==
+    bm-import bookmarks.html | bm --merge     # the HTML export of any browser
+    bm-import vivaldi | bm --merge            # or chrome, brave, edge, chromium
+    bm-import path/to/Bookmarks | bm --merge  # a Chromium JSON file (needs jq)
+
+A browser name imports the bookmarks of all profiles of that browser. The
+profiles are in ~/.config, in ~/Library/Application Support on macOS, or in
+%LOCALAPPDATA% on Windows. Folder names become tags ("Dev Tools" becomes
+dev-tools). bm --merge skips what you already have, so importing twice adds
+nothing. To sync new browser bookmarks into bm, run the same command again.
+Look before you merge: bm-import prints plain bookmark lines.
+
+bm-watch does this import at once, and again each time that the bookmark
+file of a profile changes. It only adds bookmarks, and it never writes to
+the browser:
+
+    bm-watch brave &
+
+== Dead links ==
+    bm-check
+
+prints status<tab>url for links that fail, and status<tab>url<tab>new-url for
+ones that moved for good. It exits 1 if it printed anything.
+
+== History and sync with git ==
+With bm-commit installed, every change bm makes is committed, provided the
+directory holding the bookmark file is a git repository of its own. It never
+pushes or pulls.
+
+    cd ~/.local/share/sbm && git init
+    printf '%s\n' '*.usage' '*.bak*' > .gitignore
+
+A file that merely sits inside a bigger repository (your dotfiles) is left
+alone unless SBM_GIT=1. SBM_GIT=0 turns commits off.
 
 == Sync ==
-bm-sync keeps the bookmark file the same on all your devices. It works
-with bm on other computers, the sbm app for Android and the sbm add-on for
-Firefox and Chrome. It needs curl. Like bm, it uses the file in $BOOKMARKS.
+bm-sync keeps the bookmark file the same on all your computers, the sbm app
+for Android and the sbm add-on for Firefox and Chrome.
 
-    bm-sync login        # once on each device: email and password
+    bm-sync login        # once on each computer: email and password
     bm-sync              # sync now
-    bm-sync status       # the server and the time of the last sync
-    bm-sync logout       # sign out on this device
 
-After bm adds a bookmark, bm runs bm-sync in the background. The server
-merges the changes of each device. When you add or delete a bookmark on
-one device, sync adds or deletes it on the others. bm-sync keeps the
-sign-in token in ~/.config/sbm/sync. Only you can read this file.
+When bm-sync is installed and signed in, bm syncs after each change, in the
+background. Bookmarks that you add or remove on one device are added or
+removed on the others. The file stays a plain file, and bm works without a
+network. The sign-in token is kept in ~/.config/sbm/sync.
 
-By default, bm-sync uses the server https://sbm.subread.space. Create an
-account there first. The server is free software
-(https://github.com/equwal/sbm-sync), so you can run your own:
+An empty or missing bookmark file removes nothing on the other devices:
+bm-sync gets all the bookmarks back from the server.
+
+bm and bm-sync lock the file for each change, with the directory
+$BOOKMARKS.lock, so that neither writes over a change of the other. bm -e
+holds the lock until the editor ends; bm-sync waits for it, and bm syncs
+the edit after. A lock left by a process that is gone is taken over.
+
+The server is sbm-sync (https://github.com/equwal/sbm-sync). bm-sync uses
+https://sbm.subread.space unless you give another server: create an account
+there. The server is free software, so you can run your own:
 
     bm-sync login https://sbm.example.org
 
-bm writes lines as "URL description | tags". The app and the add-on write
-lines as "URL<tab>description<tab>tags", and bm-sync puts these lines in
-your file. The file can hold lines in both formats. bm copies the URL of
-both.
+The sbm app for Android is at https://github.com/equwal/sbm-android. A demo of
+sync between bm and the browser add-on (80 seconds):
+https://github.com/equwal/sbm-sync#sbm-sync
 
-== Tip ==
-The bookmarks can be converted from the web browser formats using
-netscape-bookmark-converter at https://github.com/jhh/netscape-bookmark-converter
+== Migrating from the old format ==
+Earlier versions wrote "URL description | tag tag".
+
+    bm-migrate                  # $BOOKMARKS, or the default file
+    bm-migrate -n file          # only show what it would become
+    bm-migrate - < old > new    # as a filter
+
+The original is kept as .bak, and an existing .bak is never overwritten.
+
+== Configuration ==
+The defaults are in config.h, which make copies from config.def.h; edit it and
+build again. The environment wins over them at run time, and all of it is
+optional.
+
+    BOOKMARKS     bookmark file
+    USERTAGS      tag choices file
+    DMENULINES    lines shown by dmenu (default 15)
+    SBM_MENU      dmenu, fzf, or a custom command
+    SBM_FZF_OPTS  extra options for every fzf call
+    SBM_SORT      default sort order
+    SBM_SEARCH    default search engine, with %s for the query
+    SBM_ENGINES   search keywords file
+    SBM_COPY      command that reads the new clipboard contents from stdin
+    SBM_PASTE     command that writes the clipboard contents to stdout
+    SBM_OPEN      command that opens the URL given as its argument
+    SBM_LOCK_WAIT seconds that bm and bm-sync wait for the lock (default 10)
+
+With a display bm uses dmenu; fzf is only used when dmenu is missing or
+there is no X11 or Wayland display. A custom SBM_MENU is called with the
+choices on stdin as one of:
+
+    <command> pick  <prompt>     print the chosen line, or the typed text
+    <command> multi <prompt>     print every chosen line
+    <command> ask   <prompt>     print free text; stdin holds a default, if any
+
+Printing nothing means the user cancelled. test/fakemenu is a small example.
+
+== Windows ==
+bm runs under Cygwin. Get sbm-VERSION-setup.exe from a release on GitHub and
+start it. The installer puts bm and the bm-* tools in /usr/local/bin. It
+makes a Start menu entry and a desktop shortcut that open bm in a mintty
+window, and Esc closes the window. The key of the desktop shortcut is
+Ctrl+Alt+Shift+F24. Almost no keyboard has an F24 key, so keyboard firmware
+can use this key combination without conflicts.
+
+The installer imports the bookmarks of all profiles of the Chromium browsers
+(Brave, Chrome, Chromium, Edge and Vivaldi). A Startup entry, sbm-watch, runs
+bm-watch at each login, so new browser bookmarks come into bm a few seconds
+after you add them. The import needs the jq package of Cygwin.
+
+The installer also puts fzf.exe, the Windows build of fzf, in
+/usr/local/libexec/sbm. Do not use the fzf package of Cygwin. That package is
+version 0.11 from 2016, and it has no --preview and no --expect. The wrapper
+/usr/local/bin/fzf lets fzf.exe run in mintty. /etc/profile.d/sbm.sh sets
+SBM_OPEN, SBM_COPY, SBM_PASTE and SBM_FZF_OPTS for Cygwin. Settings in
+~/.bash_profile win.
+
+For bm-title, bm-check and bm-import, install the curl and jq packages of
+Cygwin. The Windows builds of curl and jq do not understand Cygwin paths,
+such as /dev/null. To remove sbm, use Apps in the Windows settings. The
+uninstaller keeps your bookmarks. contrib/windows/build-installer.sh makes
+the installer with NSIS.
+
+== macOS ==
+Get sbm-VERSION.dmg from a release on GitHub, and drag sbm.app to
+Applications. The app contains bm, the bm-* tools and fzf, so it needs no
+other software. sbm.app opens bm in a Terminal window. The first time, macOS
+asks if sbm can control Terminal.
+
+The app has no signature from a registered developer, so macOS stops it the
+first time. To open it, use Open Anyway in System Settings, Privacy &
+Security. Or remove the quarantine attribute:
+
+    xattr -dr com.apple.quarantine /Applications/sbm.app
+
+To open sbm with a key, make a shortcut with the action Open App in the
+Shortcuts app, and give it a keyboard shortcut. macOS has function keys up
+to F20. To use the tools in a shell, add these lines to ~/.zprofile:
+
+    PATH=/Applications/sbm.app/Contents/Resources/bin:$PATH
+    export SBM_OPEN=open SBM_COPY=pbcopy SBM_PASTE=pbpaste
+
+contrib/macos/build-dmg.sh makes the image on a Mac.
+
+== Tests ==
+    make check
+
+builds, runs shellcheck over the scripts when it is installed, and runs
+test/run.sh. The tests script dmenu, fzf and curl, so they need no display and
+no network. SBM_SH=dash sh test/run.sh runs the tools that are scripts under
+another shell, and SBM_BIN=dir tests the compiled tools of another build, for
+example one with -fsanitize=address,undefined. test/fuzz.c has libFuzzer
+targets for everything that parses a file; test/corpus holds their seeds and
+the inputs that once broke something.
+
+== Releases ==
+Set VERSION in config.mk. Tag the release as vVERSION. make dist makes the
+tarball. contrib/windows/build-installer.sh makes the Windows installer. On
+a Mac, contrib/macos/build-dmg.sh makes the image. Attach the three files to
+the GitHub release of the tag.
+
+== Credits ==
+Some ideas taken from Karl Voit:
+https://karl-voit.at/2022/01/29/How-to-Use-Tags/
 
 == License ==
 AGPL-3.0: see LICENSE. If you run a changed version for other people over a
 network, give them its source code.
+
+If sbm is useful to you, you can support it on Ko-fi:
+https://ko-fi.com/truex

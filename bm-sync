@@ -1,14 +1,17 @@
 #!/bin/sh
 
-# bm-sync: keep $BOOKMARKS the same on all your devices through an sbm-sync
-# server (https://github.com/equwal/sbm-sync). bm runs it after each add.
+# bm-sync: keep the bookmark file the same on all your devices, through an
+# sbm-sync server (https://github.com/equwal/sbm-sync). bm runs it after each
+# change when it is installed; you can also run it yourself, or from cron.
 #
-# bm-sync sends the file and the version of the last sync. The server merges
-# the changes into its copy. Then it sends back the result and its version.
+# The server merges: bookmarks that you add or remove here are added or
+# removed there, and the other way round. The file stays a plain file.
 
+DATADIR=${XDG_DATA_HOME:-$HOME/.local/share}/sbm
+BOOKMARKS=${BOOKMARKS:-$DATADIR/bookmarks}
 CONFIG=${SBM_SYNC_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sbm/sync}
 SERVER=https://sbm.subread.space
-STATE=$BOOKMARKS.sync   # the version of the last sync
+STATE=$BOOKMARKS.sync   # name of the version of the last sync
 LOCK=$BOOKMARKS.sync.lock
 WLOCK=$BOOKMARKS.lock   # the write lock of bm
 quiet=
@@ -16,11 +19,12 @@ quiet=
 usage () {
     cat <<'EOF'
 usage: bm-sync [-q] [login [server] | logout | status]
-Without a command, bm-sync syncs $BOOKMARKS.
-  login   sign in and sync (default server: https://sbm.subread.space)
-  logout  sign out on this device
-  status  show the server and the time of the last sync
-  -q      print only errors
+Without a command: sync the bookmark file now.
+  login     sign in to the server (default https://sbm.subread.space)
+            and sync; asks for your email and password
+  logout    sign out on this computer
+  status    show the server and the time of the last sync
+  -q        print nothing but errors
 EOF
 }
 
@@ -33,9 +37,16 @@ say () {
     [ -n "$quiet" ] || printf 'bm-sync: %s\n' "$*"
 }
 
-# setting <name>: the value of <name> in the config file.
+# setting <name>: a value from the config file.
 setting () {
     sed -n "s/^$1=//p" "$CONFIG" 2>/dev/null | head -n 1
+}
+
+# private <file>: make <file> an empty file that only you can read. umask
+# sets the mode of a new file. chmod sets the mode of a file that exists
+# already, for example the config file of an earlier login.
+private () {
+    (umask 077; : > "$1") && chmod 600 "$1"
 }
 
 cleanup () {
@@ -44,9 +55,10 @@ cleanup () {
     wunlock
 }
 
-# wlock: take the write lock of bm, as bm does, so that neither writes over
-# a change of the other. After $SBM_LOCK_WAIT seconds (default 10) bm-sync
-# stops, and the next add in bm syncs again.
+# wlock: take the write lock of bm, as bm does. bm holds it while it changes
+# the file: while bm -e runs, that is until the editor ends. After
+# $SBM_LOCK_WAIT seconds (default 10) bm-sync stops, and the next change in
+# bm syncs again.
 wlock () {
     waited=0
     until mkdir "$WLOCK" 2>/dev/null; do
@@ -56,7 +68,7 @@ wlock () {
             continue
         fi
         [ "$waited" -lt "${SBM_LOCK_WAIT:-10}" ] \
-            || die "$BOOKMARKS is in use: sync again later"
+            || die "$BOOKMARKS is in use (bm -e?): sync again later"
         sleep 1
         waited=$((waited + 1))
     done
@@ -82,16 +94,17 @@ login () {
     printf '\n' >&2
     [ $rc -eq 0 ] || exit 1
 
-    # curl gets the password through stdin and the token through a file.
-    # Other users can see command lines with ps.
+    # The password goes through stdin: on the command line, other users
+    # could see it with ps.
     code=$(printf '%s' "$password" | curl -sS -o "$work/out" -w '%{http_code}' \
         --data-urlencode "email=$email" --data-urlencode 'password@-' \
         -- "$server/api/login") || die "cannot reach $server"
     [ "$code" = 200 ] || die "$(cat "$work/out")"
+    token=$(tr -d '\r\n' < "$work/out")
 
-    # The config file holds the token, so only you can read it.
-    mkdir -p "$(dirname "$CONFIG")" && : > "$CONFIG" && chmod 600 "$CONFIG" || exit 1
-    printf 'server=%s\ntoken=%s\n' "$server" "$(tr -d '\r\n' < "$work/out")" > "$CONFIG"
+    mkdir -p "$(dirname "$CONFIG")" || exit 1
+    private "$CONFIG" || exit 1
+    printf 'server=%s\ntoken=%s\n' "$server" "$token" > "$CONFIG"
     rm -f "$STATE"
     say "signed in to $server"
     sync
@@ -99,6 +112,7 @@ login () {
 
 logout () {
     if [ -e "$CONFIG" ]; then
+        private "$work/auth"
         printf 'Authorization: Bearer %s\n' "$(setting token)" > "$work/auth"
         curl -sS -o /dev/null -X POST -H "@$work/auth" -- "$(setting server)/api/logout" \
             2>/dev/null
@@ -120,37 +134,46 @@ status () {
     fi
 }
 
+# sync: send the file with the name of its last version; the server gives
+# back the merged file and the name of the new version.
 sync () {
     [ -e "$CONFIG" ] || die 'not signed in: run bm-sync login'
     server=$(setting server)
     token=$(setting token)
     [ -n "$server" ] && [ -n "$token" ] || die "$CONFIG is damaged: run bm-sync login"
 
-    # One sync at a time. A second bm-sync leaves a note and stops. The
-    # first bm-sync then syncs again.
+    # One sync at a time. A second bm-sync leaves a note and exits: the
+    # first one then syncs again, so that no change waits for the next one.
     if ! mkdir "$LOCK" 2>/dev/null; then
         pid=$(cat "$LOCK/pid" 2>/dev/null)
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             : > "$LOCK/again"
-            say "bm-sync $pid syncs now, and then syncs again"
             exit 0
         fi
-        rm -rf "$LOCK"   # a killed bm-sync left the lock
+        rm -rf "$LOCK"   # left by a bm-sync that was killed
         mkdir "$LOCK" 2>/dev/null || die "cannot lock $LOCK"
     fi
     locked=1
     echo $$ > "$LOCK/pid"
 
+    private "$work/auth"
     printf 'Authorization: Bearer %s\n' "$token" > "$work/auth"
-    : >> "$BOOKMARKS" || exit 1   # a new device has no file yet
+    if [ ! -e "$BOOKMARKS" ]; then
+        mkdir -p "$(dirname "$BOOKMARKS")" && : > "$BOOKMARKS" || exit 1
+    fi
+
     tries=0
     while :; do
         rm -f "$LOCK/again"
+        # bm writes a delete as an empty file and then the new text. Without
+        # the lock, bm-sync could send the half-written file, and the server
+        # would delete the lines that it lacks.
         wlock
-        cat "$BOOKMARKS" > "$work/sent" || die "cannot read $BOOKMARKS"
+        cat "$BOOKMARKS" > "$work/sent"
         wunlock
-        # An empty file with a version tells the server to delete all
-        # bookmarks. Without a version, the server deletes nothing.
+        # An empty file with a version would delete all bookmarks on the
+        # server, and then on all devices. Without a version, the server
+        # deletes nothing, and sends all bookmarks back.
         [ -s "$work/sent" ] || rm -f "$STATE"
         base=$(cat "$STATE" 2>/dev/null)
         code=$(curl -sS --max-time 60 -o "$work/out" -D "$work/head" -w '%{http_code}' \
@@ -165,28 +188,35 @@ sync () {
         version=$(tr -d '\r' < "$work/head" | sed -n 's/^[Ss][Bb][Mm]-[Vv][Ee][Rr][Ss][Ii][Oo][Nn]: *//p')
         [ -n "$version" ] || die 'the server gave no version'
 
-        # Hold the lock from the check to the write, so that no add of bm
+        # Hold the lock from the check to the write, so that no change of bm
         # comes between them.
         wlock
-        # bm changed the file during the request: send the new file.
+        # bm changed the file while it was away: send the new file. The
+        # answer to the old one is of no use.
         if ! cmp -s "$work/sent" "$BOOKMARKS"; then
             wunlock
             tries=$((tries + 1))
             [ $tries -lt 5 ] || die 'the file changes all the time: try again later'
             continue
         fi
+        wrote=
         if ! cmp -s "$work/out" "$BOOKMARKS"; then
-            # Forget the version first. If the write fails, the next sync
-            # then deletes nothing on the server.
+            # Forget the version first, and keep the new one only after the
+            # write. If the write stops part way (a full disk), the next sync
+            # sends no version, so the server deletes none of the lost lines.
             rm -f "$STATE"
-            # Write through cat, not mv: a symlink stays a symlink.
+            # Through cat, not mv, as in bm: a symlinked file stays a symlink.
             cat "$work/out" > "$BOOKMARKS" || die "cannot write $BOOKMARKS"
+            wrote=1
         fi
         printf '%s\n' "$version" > "$STATE"
         wunlock
+        if [ -n "$wrote" ] && command -v bm-commit >/dev/null 2>&1; then
+            bm-commit 'bm-sync: merge'
+        fi
         [ -e "$LOCK/again" ] || break
     done
-    say "in sync: $(grep -c . "$BOOKMARKS") bookmarks"
+    say "in sync: $(grep -c -v -e '^#' -e '^[[:space:]]*$' "$BOOKMARKS") bookmarks"
 }
 
 while [ $# -gt 0 ]; do
@@ -199,16 +229,15 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-[ -n "$BOOKMARKS" ] || die 'BOOKMARKS is not set: set it to your bookmark file, as the README says'
 command -v curl >/dev/null 2>&1 || die 'curl is not installed'
-# mkdir fails when the directory exists. Thus bm-sync does not use a
-# directory that another user made.
+# mkdir fails when the name exists: a directory planted in a shared /tmp is
+# refused, not used.
 work=${TMPDIR:-/tmp}/bm-sync.$$
 mkdir -m 700 "$work" || die "cannot create $work"
 locked=
 wlocked=
 trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
+trap 'exit 1' INT TERM
 
 case ${1:-sync} in
     login)  shift; login "$@" ;;
